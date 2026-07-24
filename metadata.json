@@ -1,0 +1,8 @@
+{
+  "name": "K Relatórios",
+  "description": "Sistema profissional de automação, agendamento e envio de relatórios em PDF via WhatsApp Business API com integração Supabase e suporte a tema escuro.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
