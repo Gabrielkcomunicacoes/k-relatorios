@@ -187,11 +187,11 @@ export async function processarEnvioItem(
     }
 
     // 5. Validations
-    if (!cliente.ativo) {
+    if (cliente.ativo === false) {
       return await saveFailure("CLIENTE_INATIVO", "O cliente associado está marcado como inativo.", currentTentativas);
     }
 
-    if (!cliente.possui_optin) {
+    if (cliente.possui_optin === false) {
       return await saveFailure("CLIENTE_SEM_OPTIN", "O cliente não possui termo de consentimento (opt-in) ativo.", currentTentativas);
     }
 
@@ -290,6 +290,13 @@ export async function processarEnvioItem(
     // 9. Send Template Message via WhatsApp Cloud API
     const competenciaFormatada = formatDateToCompetencia(relatorio.competencia || loteCompetencia);
 
+    const nomeDestinatario =
+      cliente.contato_principal?.trim() ||
+      cliente.nome_contato?.trim() ||
+      cliente.nome?.trim() ||
+      cliente.empresa?.trim() ||
+      "cliente";
+
     const messagePayload = {
       messaging_product: "whatsapp",
       recipient_type: "individual",
@@ -318,7 +325,7 @@ export async function processarEnvioItem(
             parameters: [
               {
                 type: "text",
-                text: cliente.empresa, // {{1}}
+                text: nomeDestinatario, // {{1}}
               },
               {
                 type: "text",
@@ -358,18 +365,31 @@ export async function processarEnvioItem(
     console.log(`[Meta Send Success] Mensagem disparada com sucesso! ID: ${whatsappMessageId}`);
 
     // 10. Update databases for successful send
+    const agoraIso = new Date().toISOString();
+    const exclusaoAgendadaIso = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
     await supabase
       .from("fila_envios")
       .update({
         status: "enviado",
         whatsapp_message_id: whatsappMessageId,
-        enviado_em: new Date().toISOString(),
+        enviado_em: agoraIso,
         tentativas: currentTentativas + 1,
         erro_codigo: null,
         erro_mensagem: null,
-        updated_at: new Date().toISOString(),
+        updated_at: agoraIso,
       })
       .eq("id", filaEnvioId);
+
+    if (filaItem.relatorio_id) {
+      await supabase
+        .from("relatorios")
+        .update({
+          arquivo_exclusao_agendada_para: exclusaoAgendadaIso,
+          updated_at: agoraIso
+        })
+        .eq("id", filaItem.relatorio_id);
+    }
 
     // Save status history
     await supabase.from("historico_status").insert({

@@ -8,7 +8,8 @@ import {
   lotesService,
   filaService,
   auditoriaService,
-  competenciaToDateStr
+  competenciaToDateStr,
+  workerService
 } from './services/supabaseService';
 
 // Component views
@@ -17,9 +18,11 @@ import Sidebar, { SidebarTab } from './components/Sidebar';
 import DashboardView from './components/DashboardView';
 import ClientsView from './components/ClientsView';
 import UploadAndReviewView from './components/UploadAndReviewView';
+import ReportsView from './components/ReportsView';
 import BatchesView from './components/BatchesView';
 import HistoryView from './components/HistoryView';
 import SettingsView from './components/SettingsView';
+import IntegrationsView from './components/IntegrationsView';
 
 import { Shield, Sparkles, Terminal } from 'lucide-react';
 
@@ -56,33 +59,57 @@ export default function App() {
   const [isLoadingSupabase, setIsLoadingSupabase] = useState(false);
   const [supabaseError, setSupabaseError] = useState<string | null>(null);
 
-  // Load Supabase if active
-  useEffect(() => {
+  // Load Supabase data
+  const loadAllData = async () => {
     if (!isSupabaseConfigured || !supabase) return;
+    setIsLoadingSupabase(true);
+    setSupabaseError(null);
+    let hasError = false;
+    let lastErrorMessage = '';
 
-    const loadAllData = async () => {
-      setIsLoadingSupabase(true);
-      setSupabaseError(null);
+    try {
+      // Restore user session first if any
       try {
-        // Restore user session first if any
         const currentUser = await authService.getCurrentUser();
         if (currentUser) {
           setUser(currentUser);
         }
+      } catch (e) {
+        console.warn('Erro ao restaurar sessão:', e);
+      }
 
-        // 1. Clients
+      // 1. Clients
+      try {
         const dbClients = await clientesService.list();
         setClients(dbClients || []);
+      } catch (err: any) {
+        console.warn('Erro ao carregar clientes:', err);
+        hasError = true;
+        lastErrorMessage = err?.message || 'Falha ao carregar lista de clientes';
+      }
 
-        // 2. Batches
+      // 2. Batches
+      try {
         const dbBatches = await lotesService.list();
         setBatches(dbBatches || []);
+      } catch (err: any) {
+        console.warn('Erro ao carregar lotes:', err);
+        hasError = true;
+        lastErrorMessage = err?.message || 'Falha ao carregar lotes de envio';
+      }
 
-        // 3. Queue Items
+      // 3. Queue Items
+      try {
         const dbQueueItems = await filaService.list();
         setQueueItems(dbQueueItems || []);
+      } catch (err: any) {
+        console.warn('Erro ao carregar fila:', err);
+        hasError = true;
+        lastErrorMessage = err?.message || 'Falha ao carregar fila de envios';
+      }
 
-        // 4. Config
+      // 4. Config
+      try {
         const { data: dbConfig } = await supabase
           .from('whatsapp_configs')
           .select('*')
@@ -99,20 +126,76 @@ export default function App() {
             language: dbConfig.language,
           });
         }
+      } catch (e) {
+        console.warn('Erro ao carregar configurações do WhatsApp:', e);
+      }
 
-        // 5. Audit Logs
+      // 5. Audit Logs
+      try {
         const dbLogs = await auditoriaService.list();
         setAuditLogs(dbLogs || []);
       } catch (err: any) {
-        console.error('Erro ao sincronizar dados com o Supabase:', err);
-        setSupabaseError(err.message || String(err));
+        console.warn('Erro ao carregar auditoria:', err);
+      }
+
+      if (hasError) {
+        const cleanMsg = lastErrorMessage.includes('Failed to fetch')
+          ? 'Falha na conexão com o Supabase. Verifique sua conexão de internet ou as credenciais do Supabase.'
+          : lastErrorMessage;
+        setSupabaseError(cleanMsg);
+      }
+    } catch (err: any) {
+      console.error('Erro ao sincronizar dados com o Supabase:', err);
+      const rawMsg = err?.message || String(err);
+      const cleanMsg = rawMsg.includes('Failed to fetch')
+        ? 'Falha na conexão com o Supabase. Verifique sua conexão de internet ou as credenciais do Supabase.'
+        : rawMsg;
+      setSupabaseError(cleanMsg);
+    } finally {
+      setIsLoadingSupabase(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAllData();
+  }, []);
+
+  // Automated background worker loop - runs workerService automatically in the background
+  useEffect(() => {
+    if (!isSupabaseConfigured || !user) return;
+
+    let isWorkerRunning = false;
+
+    const runWorkerSilently = async () => {
+      if (isWorkerRunning) return;
+      isWorkerRunning = true;
+      try {
+        const res = await workerService.triggerManualRun(user.id);
+        if (res && (res.sucessos > 0 || res.itensProcessados > 0)) {
+          // Perform a safe silent refresh without triggering app-wide error state
+          const [dbBatches, dbQueue, dbClients] = await Promise.allSettled([
+            lotesService.list(),
+            filaService.list(),
+            clientesService.list()
+          ]);
+          if (dbBatches.status === 'fulfilled') setBatches(dbBatches.value || []);
+          if (dbQueue.status === 'fulfilled') setQueueItems(dbQueue.value || []);
+          if (dbClients.status === 'fulfilled') setClients(dbClients.value || []);
+        }
+      } catch (err) {
+        // Suppress background errors cleanly
       } finally {
-        setIsLoadingSupabase(false);
+        isWorkerRunning = false;
       }
     };
 
-    loadAllData();
-  }, []);
+    // Run worker immediately when user is authenticated
+    runWorkerSilently();
+
+    // Auto-run every 15 seconds in background
+    const interval = setInterval(runWorkerSilently, 15000);
+    return () => clearInterval(interval);
+  }, [user, isSupabaseConfigured]);
 
   // Auto-sync batch statuses based on children queue item statuses for high-fidelity state tracking
   useEffect(() => {
@@ -166,7 +249,11 @@ export default function App() {
     setAuditLogs((prev) => [newLog, ...prev]);
 
     if (isSupabaseConfigured && supabase) {
-      await supabase.from('audit_logs').insert(newLog);
+      try {
+        await auditoriaService.log(user?.id || null, acao, 'app', undefined, null, { detalhes });
+      } catch (err) {
+        console.warn('Falha ao registrar log de auditoria:', err);
+      }
     }
   };
 
@@ -361,25 +448,28 @@ export default function App() {
   const handleProcessQueueNow = async (batchId?: string) => {
     try {
       if (!isSupabaseActive || !supabase) throw new Error('Conexão com o Supabase indisponível.');
-      console.log(`Invocando Edge Function processar-fila-whatsapp para lote: ${batchId || 'geral'}`);
-      const { data, error } = await supabase.functions.invoke('processar-fila-whatsapp', {
-        body: batchId ? { loteId: batchId } : {}
-      });
+      
+      let processed = false;
+      let resultData = null;
 
-      if (error) {
-        console.error('Erro ao invocar processar-fila-whatsapp:', error);
-        throw new Error(error.message || 'Erro ao processar fila do WhatsApp');
+      try {
+        const { data, error } = await supabase.functions.invoke('processar-fila-whatsapp', {
+          body: batchId ? { loteId: batchId } : {}
+        });
+        if (!error && data) {
+          processed = true;
+          resultData = data;
+        }
+      } catch (efErr) {
+        console.warn('Edge Function processar-fila-whatsapp falhou, usando workerService diretamente:', efErr);
       }
 
-      console.log('Resultado de processar-fila-whatsapp:', data);
+      if (!processed) {
+        resultData = await workerService.triggerManualRun(user?.id);
+      }
 
-      const [dbBatches, dbQueue] = await Promise.all([
-        lotesService.list(),
-        filaService.list()
-      ]);
-      setBatches(dbBatches || []);
-      setQueueItems(dbQueue || []);
-      return data;
+      await loadAllData();
+      return resultData;
     } catch (err: any) {
       console.error('Erro no processamento manual da fila:', err);
       throw err;
@@ -420,26 +510,29 @@ export default function App() {
         await addAuditLog(user.nome, 'Reenvio de Falhas', `Iniciou reprocessamento de ${failedItems.length} falhas do lote "${batchName}".`);
       }
 
-      await supabase.from('lotes_envio').update({ status: 'processando' }).eq('id', batchId);
+      // 1. Transition batch status to 'aguardando'
+      await supabase.from('lotes_envio').update({ status: 'aguardando', updated_at: new Date().toISOString() }).eq('id', batchId);
+
+      // 2. Transition failed items: falhou -> pendente (DO NOT set directly to processando or erase error codes)
       for (const item of failedItems) {
         await supabase
           .from('fila_envios')
           .update({
-            status: 'processando',
-            tentativas: item.tentativas + 1,
-            erro_mensagem: null,
-            enviado_em: new Date().toISOString(),
+            status: 'pendente',
             updated_at: new Date().toISOString()
           })
           .eq('id', item.id);
       }
 
+      // 3. Process the queue now that items are marked 'pendente'
+      await handleProcessQueueNow(batchId);
+
       const [dbBatches, dbQueue] = await Promise.all([
         lotesService.list(),
         filaService.list()
       ]);
-      setBatches(dbBatches);
-      setQueueItems(dbQueue);
+      setBatches(dbBatches || []);
+      setQueueItems(dbQueue || []);
     } catch (err: any) {
       alert(err.message || 'Erro ao reprocessar falhas.');
     }
@@ -487,6 +580,15 @@ export default function App() {
       }
 
       setSendingId(itemId);
+
+      // Transition item status: falhou -> pendente (Rule 4)
+      await supabase
+        .from('fila_envios')
+        .update({
+          status: 'pendente',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', itemId);
 
       if (user && item) {
         await addAuditLog(user.nome, 'Envio de Mensagem', `Solicitou disparo individual de relatório para ${item.cliente_nome}.`);
@@ -580,9 +682,11 @@ export default function App() {
       case 'dashboard':
         return (
           <DashboardView
+            user={user!}
             clients={clients}
             batches={batches}
             queueItems={queueItems}
+            onDataChange={loadAllData}
             onNavigateToTab={(tab) => {
               if (tab === 'upload') setActiveTab('upload');
               if (tab === 'historico') setActiveTab('historico');
@@ -593,11 +697,13 @@ export default function App() {
       case 'clientes':
         return (
           <ClientsView
+            user={user!}
             clients={clients}
             onAddClient={handleAddClient}
             onUpdateClient={handleUpdateClient}
             onDeleteClient={handleDeleteClient}
             onImportClients={handleImportClients}
+            onDataChange={loadAllData}
           />
         );
       case 'upload':
@@ -615,15 +721,26 @@ export default function App() {
             onNavigateToTab={(tab) => setActiveTab(tab)}
           />
         );
+      case 'relatorios':
+        return (
+          <ReportsView
+            user={user!}
+            clients={clients}
+            onNavigateToTab={(tab) => setActiveTab(tab)}
+            onDataChange={loadAllData}
+          />
+        );
       case 'lotes':
         return (
           <BatchesView
+            user={user!}
             batches={batches}
             queueItems={queueItems}
             onCancelBatch={handleCancelBatch}
             onRetryFailedItems={handleRetryFailedItems}
             onRebuildQueue={handleRebuildQueue}
             onProcessQueueNow={handleProcessQueueNow}
+            onDataChange={loadAllData}
           />
         );
       case 'historico':
@@ -634,6 +751,12 @@ export default function App() {
             onRetrySingleItem={handleRetrySingleItem}
             onResendReport={handleResendReport}
             sendingId={sendingId}
+          />
+        );
+      case 'integracoes':
+        return (
+          <IntegrationsView
+            user={user!}
           />
         );
       case 'configuracoes':

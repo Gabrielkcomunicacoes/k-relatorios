@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   Users,
   UploadCloud,
+  FileText,
   Layers,
   History,
   Settings,
@@ -14,15 +15,18 @@ import {
   Shield,
   Key,
   Sun,
-  Moon
+  Moon,
+  Webhook
 } from 'lucide-react';
 
 export type SidebarTab =
   | 'dashboard'
   | 'clientes'
   | 'upload'
+  | 'relatorios'
   | 'lotes'
   | 'historico'
+  | 'integracoes'
   | 'configuracoes';
 
 interface SidebarProps {
@@ -42,8 +46,10 @@ export default function Sidebar({
     { id: 'dashboard' as SidebarTab, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'clientes' as SidebarTab, label: 'Clientes', icon: Users },
     { id: 'upload' as SidebarTab, label: 'Upload & Conferência', icon: UploadCloud },
+    { id: 'relatorios' as SidebarTab, label: 'Relatórios', icon: FileText },
     { id: 'lotes' as SidebarTab, label: 'Lotes de Envio', icon: Layers },
     { id: 'historico' as SidebarTab, label: 'Histórico & Fila', icon: History },
+    { id: 'integracoes' as SidebarTab, label: 'Integrações', icon: Webhook },
     { id: 'configuracoes' as SidebarTab, label: 'WhatsApp API', icon: Settings, adminOnly: true }
   ];
 

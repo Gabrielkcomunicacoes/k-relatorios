@@ -124,3 +124,52 @@ export interface AuditLog {
   detalhes: string;
   created_at: string;
 }
+
+export interface WorkerStatusInfo {
+  ativo: boolean;
+  ultimaExecucao: string | null;
+  proximaExecucao: string | null;
+  itensPendentes: number;
+  itensProcessadosHoje: number;
+  ultimoLog?: {
+    itensEncontrados: number;
+    itensProcessados: number;
+    sucessos: number;
+    falhas: number;
+    tempoExecucaoMs: number;
+  };
+}
+
+export interface IntegrationLog {
+  id: string;
+  origem_sistema: string;
+  identificador_origem: string | null;
+  codigo_cliente: string | null;
+  relatorio_id: string | null;
+  lote_id: string | null;
+  status: string;
+  http_status: number;
+  erro_codigo: string | null;
+  erro_mensagem: string | null;
+  recebido_em: string;
+  processado_em: string | null;
+  metadata: any;
+  created_at: string;
+}
+
+export interface IntegrationConfig {
+  id: string;
+  endpointUrl: string;
+  segredoMasked: string;
+  segredoAtualCriadoEm: string;
+  hasPreviousSecret: boolean;
+  updatedAt: string;
+}
+
+export interface IntegrationMetrics {
+  recebidosHoje: number;
+  duplicadosIgnorados: number;
+  errosProcessamento: number;
+  clientesNaoEncontrados: number;
+  ultimoRelatorioRecebidoEm: string | null;
+}

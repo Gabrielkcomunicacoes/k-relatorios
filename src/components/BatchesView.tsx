@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Batch, QueueItem, BatchStatus } from '../types';
+import { Batch, QueueItem, BatchStatus, AuthUser } from '../types';
 import {
   Layers,
   ChevronRight,
@@ -15,31 +15,114 @@ import {
   X,
   FileText,
   Play,
-  Loader2
+  Loader2,
+  Trash2,
+  AlertTriangle,
+  Archive,
+  ShieldAlert,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { lotesService } from '../services/supabaseService';
 
 interface BatchesViewProps {
+  user?: AuthUser;
   batches: Batch[];
   queueItems: QueueItem[];
   onCancelBatch: (batchId: string) => void;
   onRetryFailedItems: (batchId: string) => void;
   onRebuildQueue: (batchId: string) => Promise<void>;
   onProcessQueueNow?: (batchId: string) => Promise<void>;
+  onDataChange?: () => void;
 }
 
 export default function BatchesView({
+  user,
   batches,
   queueItems,
   onCancelBatch,
   onRetryFailedItems,
   onRebuildQueue,
-  onProcessQueueNow
+  onProcessQueueNow,
+  onDataChange
 }: BatchesViewProps) {
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
   const [selectedBatch, setSelectedBatch] = useState<Batch | null>(null);
   const [searchBatch, setSearchBatch] = useState('');
   const [isConfirmingCancel, setIsConfirmingCancel] = useState(false);
+
+  // Batch deletion modal state
+  const [batchToDelete, setBatchToDelete] = useState<Batch | null>(null);
+  const [batchDependencies, setBatchDependencies] = useState<{
+    totalItems: number;
+    deliveredCount: number;
+    failedCount: number;
+    pendingCount: number;
+  } | null>(null);
+  const [isLoadingBatchDeps, setIsLoadingBatchDeps] = useState(false);
+  const [batchDeleteConfirmText, setBatchDeleteConfirmText] = useState('');
+  const [isDeletingBatch, setIsDeletingBatch] = useState(false);
+  const [batchDeleteError, setBatchDeleteError] = useState<string | null>(null);
+
+  const handleOpenBatchDeleteModal = async (batch: Batch, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setBatchToDelete(batch);
+    setBatchDeleteConfirmText('');
+    setBatchDeleteError(null);
+    setIsLoadingBatchDeps(true);
+    setBatchDependencies(null);
+    try {
+      const deps = await lotesService.getBatchDependencies(batch.id);
+      setBatchDependencies(deps);
+    } catch (err: any) {
+      console.error('Erro ao buscar dependências do lote:', err);
+      setBatchDependencies({ totalItems: batch.quantidade, deliveredCount: 0, failedCount: 0, pendingCount: 0 });
+    } finally {
+      setIsLoadingBatchDeps(false);
+    }
+  };
+
+  const handleConfirmArchiveBatch = async () => {
+    if (!batchToDelete) return;
+    setIsDeletingBatch(true);
+    setBatchDeleteError(null);
+    try {
+      await lotesService.updateStatus(batchToDelete.id, 'cancelado');
+      if (onDataChange) onDataChange();
+      else onCancelBatch(batchToDelete.id);
+      setBatchToDelete(null);
+      if (selectedBatch?.id === batchToDelete.id) setSelectedBatch(null);
+    } catch (err: any) {
+      setBatchDeleteError(err.message || 'Erro ao arquivar o lote.');
+    } finally {
+      setIsDeletingBatch(false);
+    }
+  };
+
+  const handleConfirmExcluirLoteCompleto = async () => {
+    if (!batchToDelete) return;
+    if (user?.role !== 'Administrador') {
+      setBatchDeleteError('Apenas administradores podem excluir lotes definitivamente.');
+      return;
+    }
+    if (batchDeleteConfirmText.trim().toUpperCase() !== 'EXCLUIR') {
+      setBatchDeleteError('Digite EXCLUIR para confirmar a exclusão do lote.');
+      return;
+    }
+
+    setIsDeletingBatch(true);
+    setBatchDeleteError(null);
+    try {
+      await lotesService.excluirLoteCompleto(batchToDelete.id, user?.id);
+      if (onDataChange) onDataChange();
+      setBatchToDelete(null);
+      if (selectedBatch?.id === batchToDelete.id) setSelectedBatch(null);
+    } catch (err: any) {
+      setBatchDeleteError(err.message || 'Erro ao excluir o lote definitivamente.');
+    } finally {
+      setIsDeletingBatch(false);
+    }
+  };
 
   useEffect(() => {
     setIsConfirmingCancel(false);
@@ -196,9 +279,20 @@ export default function BatchesView({
                       </div>
                     </td>
 
-                    {/* Inspect button */}
+                    {/* Inspect and delete buttons */}
                     <td className="py-3.5 px-4 text-right">
-                      <ChevronRight className="w-4 h-4 text-slate-400 ml-auto" />
+                      <div className="inline-flex items-center gap-2">
+                        <button
+                          type="button"
+                          id={`delete_batch_btn_${batch.id}`}
+                          onClick={(e) => handleOpenBatchDeleteModal(batch, e)}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-all cursor-pointer"
+                          title="Excluir ou Arquivar Lote"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                        <ChevronRight className="w-4 h-4 text-slate-400" />
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -422,6 +516,182 @@ export default function BatchesView({
                   </button>
                 </div>
               )}
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* MODAL: DELETE / ARCHIVE BATCH */}
+      {batchToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-xl bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden"
+          >
+            <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-rose-100 text-rose-600 rounded-lg">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Gerenciar Lote de Envio
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    Escolha entre arquivar ou excluir o lote do sistema
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setBatchToDelete(null)}
+                disabled={isDeletingBatch}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5">
+              {/* Batch Summary Box */}
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900">
+                    {batchToDelete.nome}
+                  </h4>
+                  <div className="flex items-center gap-3 text-xs text-slate-500 mt-1 font-mono">
+                    <span>Competência: <strong>{batchToDelete.competencia}</strong></span>
+                    <span>•</span>
+                    <span>Criado por: <strong>{batchToDelete.criado_por}</strong></span>
+                  </div>
+                </div>
+                {getBatchStatusBadge(batchToDelete.status)}
+              </div>
+
+              {/* Dependencies Summary */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+                  Status dos Itens da Fila Neste Lote:
+                </label>
+                {isLoadingBatchDeps ? (
+                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 text-center text-xs text-slate-500 animate-pulse">
+                    Carregando resumo do lote...
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-emerald-50/50 border border-emerald-200/80 p-3 rounded-xl text-center">
+                      <div className="text-lg font-bold text-emerald-800">
+                        {batchDependencies?.deliveredCount ?? 0}
+                      </div>
+                      <div className="text-[10px] font-semibold text-emerald-600 uppercase">
+                        Entregues / Lidos
+                      </div>
+                    </div>
+                    <div className="bg-rose-50/50 border border-rose-200/80 p-3 rounded-xl text-center">
+                      <div className="text-lg font-bold text-rose-800">
+                        {batchDependencies?.failedCount ?? 0}
+                      </div>
+                      <div className="text-[10px] font-semibold text-rose-600 uppercase">
+                        Falhas
+                      </div>
+                    </div>
+                    <div className="bg-amber-50/50 border border-amber-200/80 p-3 rounded-xl text-center">
+                      <div className="text-lg font-bold text-amber-800">
+                        {batchDependencies?.pendingCount ?? 0}
+                      </div>
+                      <div className="text-[10px] font-semibold text-amber-600 uppercase">
+                        Pendentes / Fila
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {batchDeleteError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium rounded-xl flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{batchDeleteError}</span>
+                </div>
+              )}
+
+              {/* Option 1: Arquivar Lote (Default & Recommended) */}
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <Archive className="w-4 h-4 text-slate-600 shrink-0 mt-0.5" />
+                  <div>
+                    <h5 className="text-xs font-bold text-slate-900">
+                      Opção Padrão Recomendada: Arquivar Lote
+                    </h5>
+                    <p className="text-[11px] text-slate-600 leading-relaxed mt-0.5">
+                      Cancela os envios pendentes e marca o lote como cancelado, preservando todo o histórico de mensagens já enviadas e relatórios no sistema.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isDeletingBatch}
+                  onClick={handleConfirmArchiveBatch}
+                  className="w-full py-2 px-4 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-lg transition-all shadow-xs cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  Arquivar Lote (Cancelar Fila Pendente)
+                </button>
+              </div>
+
+              {/* Option 2: Permanent Delete (Admin Only) */}
+              <div className="bg-rose-50/60 border border-rose-200/80 p-4 rounded-xl space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <h5 className="text-xs font-bold text-rose-900">
+                      Exclusão Definitiva do Lote (Privilegiado - Administrador)
+                    </h5>
+                    <p className="text-[11px] text-rose-800 leading-relaxed mt-0.5">
+                      Remove o lote e apaga os seus itens da fila de envios. Por segurança, os relatórios em PDF originais cadastrados na tabela de relatórios são preservados.
+                    </p>
+                  </div>
+                </div>
+
+                {user?.role !== 'Administrador' ? (
+                  <div className="p-2.5 bg-slate-100 border border-slate-200 text-slate-600 text-xs font-medium rounded-lg flex items-center gap-2">
+                    <Lock className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Apenas administradores possuem permissão para excluir lotes definitivamente.</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-bold text-rose-900 block">
+                      Digite <span className="font-mono bg-rose-200/80 px-1.5 py-0.5 rounded text-rose-950">EXCLUIR</span> para habilitar a confirmação:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="EXCLUIR"
+                      value={batchDeleteConfirmText}
+                      onChange={(e) => setBatchDeleteConfirmText(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-white border border-rose-300 rounded-lg text-xs font-mono font-bold text-slate-900 focus:outline-none focus:border-rose-500"
+                    />
+                    <button
+                      type="button"
+                      disabled={isDeletingBatch || batchDeleteConfirmText.trim().toUpperCase() !== 'EXCLUIR'}
+                      onClick={handleConfirmExcluirLoteCompleto}
+                      className="w-full py-2 px-4 bg-rose-600 hover:bg-rose-700 disabled:bg-rose-200 disabled:text-rose-400 text-white text-xs font-bold rounded-lg transition-all shadow-xs cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      {isDeletingBatch ? 'Excluindo...' : 'Confirmar Exclusão Definitiva do Lote'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={isDeletingBatch}
+                onClick={() => setBatchToDelete(null)}
+                className="px-4 py-2 border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
             </div>
           </motion.div>
         </div>

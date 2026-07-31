@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Client } from '../types';
+import { Client, AuthUser } from '../types';
 import {
   Search,
   Plus,
@@ -14,29 +14,107 @@ import {
   Calendar,
   X,
   FileSpreadsheet,
-  Info
+  Info,
+  ShieldAlert,
+  AlertTriangle,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { clientesService } from '../services/supabaseService';
 
 interface ClientsViewProps {
+  user?: AuthUser;
   clients: Client[];
   onAddClient: (client: Omit<Client, 'id' | 'created_at' | 'updated_at'>) => void;
   onUpdateClient: (id: string, updates: Partial<Client>) => void;
   onDeleteClient: (id: string) => void;
   onImportClients: (newClients: Omit<Client, 'id' | 'created_at' | 'updated_at'>[]) => void;
+  onDataChange?: () => void;
 }
 
 export default function ClientsView({
+  user,
   clients,
   onAddClient,
   onUpdateClient,
   onDeleteClient,
-  onImportClients
+  onImportClients,
+  onDataChange
 }: ClientsViewProps) {
   // Search and filter states
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'todos' | 'ativos' | 'inativos'>('todos');
   const [optinFilter, setOptinFilter] = useState<'todos' | 'optin' | 'no-optin'>('todos');
+
+  // Deletion modal state
+  const [clientToDelete, setClientToDelete] = useState<Client | null>(null);
+  const [deleteDependencies, setDeleteDependencies] = useState<{
+    reportsCount: number;
+    queueCount: number;
+    batchesCount: number;
+  } | null>(null);
+  const [isLoadingDeps, setIsLoadingDeps] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleOpenDeleteModal = async (client: Client) => {
+    setClientToDelete(client);
+    setDeleteConfirmText('');
+    setDeleteError(null);
+    setIsLoadingDeps(true);
+    setDeleteDependencies(null);
+    try {
+      const deps = await clientesService.getClientDependencies(client.id);
+      setDeleteDependencies(deps);
+    } catch (err: any) {
+      console.error('Erro ao verificar dependências:', err);
+      setDeleteDependencies({ reportsCount: 0, queueCount: 0, batchesCount: 0 });
+    } finally {
+      setIsLoadingDeps(false);
+    }
+  };
+
+  const handleConfirmInactivate = async () => {
+    if (!clientToDelete) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      await clientesService.update(clientToDelete.id, { ativo: false });
+      if (onDataChange) onDataChange();
+      else onDeleteClient(clientToDelete.id);
+      setClientToDelete(null);
+    } catch (err: any) {
+      setDeleteError(err.message || 'Erro ao desativar cliente.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleConfirmExcluirCompleto = async () => {
+    if (!clientToDelete) return;
+    if (user?.role !== 'Administrador') {
+      setDeleteError('Apenas administradores podem realizar a exclusão definitiva.');
+      return;
+    }
+    if (deleteConfirmText.trim().toUpperCase() !== 'EXCLUIR') {
+      setDeleteError('Digite EXCLUIR para confirmar a exclusão.');
+      return;
+    }
+
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      await clientesService.excluirClienteCompleto(clientToDelete.id, user?.id);
+      if (onDataChange) onDataChange();
+      else onDeleteClient(clientToDelete.id);
+      setClientToDelete(null);
+    } catch (err: any) {
+      setDeleteError(err.message || 'Erro ao excluir cliente definitivamente.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   // Form states
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -502,13 +580,9 @@ export default function ClientsView({
                         </button>
                         <button
                           id={`delete_client_btn_${client.id}`}
-                          onClick={() => {
-                            if (confirm(`Tem certeza que deseja excluir o cliente ${client.empresa}?`)) {
-                              onDeleteClient(client.id);
-                            }
-                          }}
+                          onClick={() => handleOpenDeleteModal(client)}
                           className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-all"
-                          title="Excluir"
+                          title="Excluir ou Desativar Cliente"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -872,6 +946,188 @@ export default function ClientsView({
                   Confirmar Importação de ({importAnalysis.newClients.length})
                 </button>
               </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* MODAL: DELETE / INACTIVATE CLIENT */}
+      {clientToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-xl bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden"
+          >
+            <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-rose-100 text-rose-600 rounded-lg">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Gerenciar Exclusão do Cliente
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    Escolha entre desativar ou excluir o cliente permanentemente
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setClientToDelete(null)}
+                disabled={isDeleting}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5">
+              {/* Client Summary Box */}
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900">
+                    {clientToDelete.empresa}
+                  </h4>
+                  <div className="flex items-center gap-3 text-xs text-slate-500 mt-1 font-mono">
+                    <span>Código: <strong>{clientToDelete.codigo_cliente}</strong></span>
+                    <span>•</span>
+                    <span>Tel: <strong>{clientToDelete.telefone_whatsapp || 'Não informado'}</strong></span>
+                  </div>
+                </div>
+                <span className={`px-2.5 py-1 text-xs font-semibold rounded-full ${
+                  clientToDelete.ativo
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : 'bg-slate-200 text-slate-700'
+                }`}>
+                  {clientToDelete.ativo ? 'Ativo' : 'Inativo'}
+                </span>
+              </div>
+
+              {/* Dependencies Summary */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+                  Registros Vinculados Encontrados:
+                </label>
+                {isLoadingDeps ? (
+                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 text-center text-xs text-slate-500 animate-pulse">
+                    Verificando dependências no banco de dados...
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center">
+                      <div className="text-lg font-bold text-slate-900">
+                        {deleteDependencies?.reportsCount ?? 0}
+                      </div>
+                      <div className="text-[10px] font-semibold text-slate-500 uppercase">
+                        Relatórios
+                      </div>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center">
+                      <div className="text-lg font-bold text-slate-900">
+                        {deleteDependencies?.queueCount ?? 0}
+                      </div>
+                      <div className="text-[10px] font-semibold text-slate-500 uppercase">
+                        Itens na Fila
+                      </div>
+                    </div>
+                    <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-center">
+                      <div className="text-lg font-bold text-slate-900">
+                        {deleteDependencies?.batchesCount ?? 0}
+                      </div>
+                      <div className="text-[10px] font-semibold text-slate-500 uppercase">
+                        Lotes Relacionados
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {deleteError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium rounded-xl flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{deleteError}</span>
+                </div>
+              )}
+
+              {/* Option 1: Desativar Cliente (Default & Recommended) */}
+              <div className="bg-amber-50/70 border border-amber-200/80 p-4 rounded-xl space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <UserX className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <h5 className="text-xs font-bold text-amber-900">
+                      Opção Padrão Recomendada: Desativar Cliente
+                    </h5>
+                    <p className="text-[11px] text-amber-800 leading-relaxed mt-0.5">
+                      O cliente ficará inativo e não receberá mais envios. Todo o histórico de relatórios, disparos e auditoria será preservado com total segurança.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={handleConfirmInactivate}
+                  className="w-full py-2 px-4 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg transition-all shadow-xs cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <UserX className="w-3.5 h-3.5" />
+                  Desativar Cliente Mantendo Histórico
+                </button>
+              </div>
+
+              {/* Option 2: Permanent Delete (Admin Only) */}
+              <div className="bg-rose-50/60 border border-rose-200/80 p-4 rounded-xl space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <h5 className="text-xs font-bold text-rose-900">
+                      Exclusão Definitiva (Privilegiado - Administrador)
+                    </h5>
+                    <p className="text-[11px] text-rose-800 leading-relaxed mt-0.5">
+                      Remove o cliente e apaga em cascata seus relatórios do sistema e arquivos no bucket de armazenamento.
+                    </p>
+                  </div>
+                </div>
+
+                {user?.role !== 'Administrador' ? (
+                  <div className="p-2.5 bg-slate-100 border border-slate-200 text-slate-600 text-xs font-medium rounded-lg flex items-center gap-2">
+                    <Lock className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Apenas administradores possuem permissão para exclusão definitiva.</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-bold text-rose-900 block">
+                      Digite <span className="font-mono bg-rose-200/80 px-1.5 py-0.5 rounded text-rose-950">EXCLUIR</span> para habilitar o botão de confirmação:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="EXCLUIR"
+                      value={deleteConfirmText}
+                      onChange={(e) => setDeleteConfirmText(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-white border border-rose-300 rounded-lg text-xs font-mono font-bold text-slate-900 focus:outline-none focus:border-rose-500"
+                    />
+                    <button
+                      type="button"
+                      disabled={isDeleting || deleteConfirmText.trim().toUpperCase() !== 'EXCLUIR'}
+                      onClick={handleConfirmExcluirCompleto}
+                      className="w-full py-2 px-4 bg-rose-600 hover:bg-rose-700 disabled:bg-rose-200 disabled:text-rose-400 text-white text-xs font-bold rounded-lg transition-all shadow-xs cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      {isDeleting ? 'Excluindo...' : 'Confirmar Exclusão Definitiva'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setClientToDelete(null)}
+                className="px-4 py-2 border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
             </div>
           </motion.div>
         </div>

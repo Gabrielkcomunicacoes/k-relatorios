@@ -1,9 +1,21 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = (import.meta as any).env?.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || '';
+const supabaseUrl = ((import.meta as any).env?.VITE_SUPABASE_URL || '').trim();
+const supabaseAnonKey = ((import.meta as any).env?.VITE_SUPABASE_ANON_KEY || '').trim();
 
-export const isSupabaseConfigured = !!(supabaseUrl && supabaseAnonKey && supabaseUrl !== 'MY_SUPABASE_URL');
+const isPlaceholder = (val: string) =>
+  !val ||
+  val === 'MY_SUPABASE_URL' ||
+  val === 'YOUR_SUPABASE_URL' ||
+  val.includes('your-supabase-project') ||
+  val.includes('example.com');
+
+export const isSupabaseConfigured = !!(
+  supabaseUrl &&
+  supabaseAnonKey &&
+  !isPlaceholder(supabaseUrl) &&
+  !isPlaceholder(supabaseAnonKey)
+);
 
 // Only instantiate the Supabase client if the keys are actually configured.
 export const supabase = isSupabaseConfigured

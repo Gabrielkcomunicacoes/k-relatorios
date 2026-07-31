@@ -40,7 +40,7 @@ async function recalcularStatusLote(
     .eq("lote_id", loteId);
 
   if (qErr || !queueItems) {
-    console.error(`[recalcularStatusLote] Erro ao buscar fila para lote ${loteId}:`, qErr);
+    console.error(`[worker-fila-envios] Erro ao buscar fila para lote ${loteId}:`, qErr);
     return;
   }
 
@@ -62,13 +62,11 @@ async function recalcularStatusLote(
 
   let novoStatus = loteAtual?.status || "aguardando";
 
-  // If already canceled, preserve canceled
   if (loteAtual?.status === "cancelado") {
     novoStatus = "cancelado";
   } else if (totalPendentes > 0) {
     novoStatus = temProcessando ? "processando" : "aguardando";
   } else if (totalItens > 0) {
-    // All items processed
     novoStatus = totalFalhas > 0 ? "concluido_com_falhas" : "concluido";
   }
 
@@ -83,7 +81,7 @@ async function recalcularStatusLote(
     })
     .eq("id", loteId);
 
-  console.log(`[recalcularStatusLote] Lote ${loteId} atualizado: status=${novoStatus}, enviados=${totalEnviados}/${totalItens}, falhas=${totalFalhas}`);
+  console.log(`[worker-fila-envios] Lote ${loteId} atualizado: status=${novoStatus}, enviados=${totalEnviados}/${totalItens}, falhas=${totalFalhas}`);
 }
 
 /**
@@ -94,11 +92,10 @@ async function processarEnvioItem(
   filaEnvioId: string
 ): Promise<EnvioResult> {
   const saveFailure = async (code: string, message: string, itemCurrentTentativas: number = 0): Promise<EnvioResult> => {
-    console.error(`[Falha no Envio - Fila ID: ${filaEnvioId}] Código: ${code} - Mensagem: ${message}`);
+    console.error(`[Worker Falha - Fila ID: ${filaEnvioId}] Código: ${code} - Mensagem: ${message}`);
 
     const novasTentativas = itemCurrentTentativas + 1;
 
-    // Update fila_envios status
     await supabase
       .from("fila_envios")
       .update({
@@ -110,21 +107,19 @@ async function processarEnvioItem(
       })
       .eq("id", filaEnvioId);
 
-    // Insert status history
     await supabase.from("historico_status").insert({
       fila_envio_id: filaEnvioId,
       status_anterior: "processando",
       status_novo: "falhou",
-      detalhes: { error_code: code, error_message: message },
+      detalhes: { error_code: code, error_message: message, via: "worker-fila-envios" },
     });
 
-    // Insert audit log
     await supabase.from("logs_auditoria").insert({
-      acao: "Falha no Envio de Relatório",
+      acao: "Falha no Envio pelo Worker",
       entidade: "fila_envios",
       entidade_id: filaEnvioId,
       dados_novos: { error_code: code, error_message: message },
-      user_agent: "Supabase Edge Function",
+      user_agent: "Worker Fila Envios Edge Function",
     });
 
     return {
@@ -137,7 +132,6 @@ async function processarEnvioItem(
   };
 
   try {
-    // 1. Fetch fila_envios
     const { data: filaItem, error: filaError } = await supabase
       .from("fila_envios")
       .select("*")
@@ -150,7 +144,6 @@ async function processarEnvioItem(
 
     const currentTentativas = filaItem.tentativas || 0;
 
-    // 2. Read Meta WhatsApp credentials securely from env vars using Deno.env.get()
     const accessToken = Deno.env.get("WHATSAPP_ACCESS_TOKEN");
     const phoneNumberId = Deno.env.get("WHATSAPP_PHONE_NUMBER_ID");
     const businessAccountId = Deno.env.get("WHATSAPP_BUSINESS_ACCOUNT_ID");
@@ -161,12 +154,11 @@ async function processarEnvioItem(
     if (!accessToken || !phoneNumberId || !businessAccountId || !templateName || !templateLanguage || !graphApiVersion) {
       return await saveFailure(
         "CONFIG_ERROR",
-        "Erro de configuração: Credenciais do WhatsApp ausentes ou inválidas nas variáveis de ambiente.",
+        "Erro de configuração: Credenciais do WhatsApp ausentes nas variáveis de ambiente.",
         currentTentativas
       );
     }
 
-    // 3. Fetch Lote
     let loteCompetencia = "";
     if (filaItem.lote_id) {
       const { data: lote } = await supabase
@@ -181,7 +173,6 @@ async function processarEnvioItem(
       loteCompetencia = lote?.competencia || "";
     }
 
-    // 4. Fetch Cliente
     const { data: cliente, error: clienteError } = await supabase
       .from("clientes")
       .select("*")
@@ -192,7 +183,6 @@ async function processarEnvioItem(
       return await saveFailure("CLIENTE_NOT_FOUND", "Cliente associado não foi encontrado.", currentTentativas);
     }
 
-    // 5. Validations
     if (cliente.ativo === false) {
       return await saveFailure("CLIENTE_INATIVO", "O cliente associado está marcado como inativo.", currentTentativas);
     }
@@ -205,7 +195,6 @@ async function processarEnvioItem(
       return await saveFailure("TELEFONE_AUSENTE", "O cliente não possui um número de WhatsApp cadastrado.", currentTentativas);
     }
 
-    // 6. Fetch Relatório
     if (!filaItem.relatorio_id) {
       return await saveFailure(
         "RELATORIO_ID_AUSENTE",
@@ -240,8 +229,7 @@ async function processarEnvioItem(
       return await saveFailure("STORAGE_PATH_MISSING", "O relatório associado não possui caminho de armazenamento.", currentTentativas);
     }
 
-    // 7. Download PDF from Storage bucket 'relatorios'
-    console.log(`[Storage] Baixando PDF para Fila Item ${filaEnvioId}: ${relatorio.storage_path}`);
+    // Download PDF from Storage bucket
     const { data: fileBlob, error: downloadError } = await supabase.storage
       .from("relatorios")
       .download(relatorio.storage_path);
@@ -254,8 +242,7 @@ async function processarEnvioItem(
       );
     }
 
-    // 8. Upload PDF file to Meta (WhatsApp Cloud API Media Endpoint)
-    console.log(`[Meta Upload] Iniciando upload de mídia PDF para Meta...`);
+    // Upload PDF file to Meta API
     const metaFormData = new FormData();
     metaFormData.append("messaging_product", "whatsapp");
     metaFormData.append("type", "application/pdf");
@@ -279,11 +266,8 @@ async function processarEnvioItem(
 
     const uploadResult = await uploadResponse.json();
     const mediaId = uploadResult.id;
-    console.log(`[Meta Upload Success] Media ID obtido: ${mediaId}`);
 
-    // 9. Send Template Message via WhatsApp Cloud API
     const competenciaFormatada = formatDateToCompetencia(relatorio.competencia || loteCompetencia);
-
     const nomeDestinatario =
       cliente.contato_principal?.trim() ||
       cliente.nome_contato?.trim() ||
@@ -319,11 +303,11 @@ async function processarEnvioItem(
             parameters: [
               {
                 type: "text",
-                text: nomeDestinatario, // {{1}}
+                text: nomeDestinatario,
               },
               {
                 type: "text",
-                text: competenciaFormatada, // {{2}}
+                text: competenciaFormatada,
               },
             ],
           },
@@ -331,7 +315,6 @@ async function processarEnvioItem(
       },
     };
 
-    console.log(`[Meta Message Send] Enviando template para WhatsApp do cliente...`);
     const sendResponse = await fetch(
       `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
       {
@@ -356,9 +339,6 @@ async function processarEnvioItem(
       return await saveFailure("META_NO_MESSAGE_ID", "Mensagem enviada porém Meta não retornou ID único.", currentTentativas);
     }
 
-    console.log(`[Meta Send Success] Mensagem disparada com sucesso! ID: ${whatsappMessageId}`);
-
-    // 10. Update databases for successful send
     await supabase
       .from("fila_envios")
       .update({
@@ -372,21 +352,19 @@ async function processarEnvioItem(
       })
       .eq("id", filaEnvioId);
 
-    // Save status history
     await supabase.from("historico_status").insert({
       fila_envio_id: filaEnvioId,
       status_anterior: "processando",
       status_novo: "enviado",
-      detalhes: { whatsapp_message_id: whatsappMessageId, media_id: mediaId },
+      detalhes: { whatsapp_message_id: whatsappMessageId, media_id: mediaId, via: "worker-fila-envios" },
     });
 
-    // Save audit log
     await supabase.from("logs_auditoria").insert({
-      acao: "Envio de Relatório Sucesso",
+      acao: "Envio Sucesso via Worker",
       entidade: "fila_envios",
       entidade_id: filaEnvioId,
       dados_novos: { whatsapp_message_id: whatsappMessageId, media_id: mediaId },
-      user_agent: "Supabase Edge Function",
+      user_agent: "Worker Fila Envios Edge Function",
     });
 
     return {
@@ -396,16 +374,18 @@ async function processarEnvioItem(
       whatsappMessageId
     };
   } catch (err: any) {
-    console.error(`[Fatal Error - Fila ID: ${filaEnvioId}] Exception:`, err);
-    return await saveFailure("EXCEPTION", err.message || "Erro desconhecido ao processar envio.");
+    console.error(`[Worker Exception - Fila ID: ${filaEnvioId}]`, err);
+    return await saveFailure("EXCEPTION", err.message || "Erro desconhecido ao processar envio no worker.");
   }
 }
 
 serve(async (req) => {
-  // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
+
+  const startTime = Date.now();
+  console.log(`[worker-fila-envios] Worker iniciado em ${new Date().toISOString()}`);
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -417,115 +397,135 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Parse request body
-    let loteId: string | undefined = undefined;
-    try {
-      const body = await req.json();
-      if (body && body.loteId) {
-        loteId = body.loteId;
-      }
-    } catch (_e) {
-      // Body empty or not JSON -> process general queue
-    }
+    // 1. Search candidate queue items: status = 'pendente' OR (status = 'agendado' AND data_programada <= now())
+    const nowIso = new Date().toISOString();
 
-    console.log(`[processar-fila-whatsapp] Inicio do processamento. LoteId especificado: ${loteId || 'Nenhum (fila geral)'}`);
-
-    // If specific loteId provided, check if batch is canceled
-    if (loteId) {
-      const { data: lote, error: loteErr } = await supabase
-        .from("lotes_envio")
-        .select("id, status")
-        .eq("id", loteId)
-        .single();
-
-      if (loteErr || !lote) {
-        console.warn(`[processar-fila-whatsapp] Lote ${loteId} não foi encontrado no banco.`);
-        return new Response(
-          JSON.stringify({ success: false, error: "Lote não encontrado." }),
-          { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
-      if (lote.status === "cancelado") {
-        console.warn(`[processar-fila-whatsapp] Lote ${loteId} está cancelado. Interrompendo processamento.`);
-        return new Response(
-          JSON.stringify({ success: false, message: "Lote está cancelado. Nenhum envio processado." }),
-          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-    }
-
-    // Query candidate queue items
-    let query = supabase
+    const { data: rawCandidates, error: queryErr } = await supabase
       .from("fila_envios")
       .select("id, lote_id, cliente_id, relatorio_id, tentativas, created_at, status, data_programada")
-      .eq("status", "pendente")
+      .in("status", ["pendente", "agendado", "processando"])
       .not("relatorio_id", "is", null)
       .is("whatsapp_message_id", null)
       .lt("tentativas", 3)
       .order("created_at", { ascending: true })
-      .limit(5);
+      .limit(20);
 
-    if (loteId) {
-      query = query.eq("lote_id", loteId);
+    if (queryErr) {
+      console.error("[worker-fila-envios] Erro ao buscar itens na fila:", queryErr);
+      throw queryErr;
     }
 
-    const { data: candidates, error: candidateErr } = await query;
+    const candidateItems = rawCandidates || [];
+    const itensEncontrados = candidateItems.length;
 
-    if (candidateErr) {
-      console.error("[processar-fila-whatsapp] Erro ao buscar itens elegíveis:", candidateErr);
-      throw candidateErr;
-    }
+    console.log(`[worker-fila-envios] Itens elegíveis encontrados na fila: ${itensEncontrados}`);
 
-    // Filter candidate items where data_programada <= now or null
-    const nowTimestamp = Date.now();
-    const eligibleItems = (candidates || []).filter((item: any) => {
-      if (!item.data_programada) return true;
-      return new Date(item.data_programada).getTime() <= nowTimestamp;
-    });
+    if (itensEncontrados === 0) {
+      const executionTimeMs = Date.now() - startTime;
+      
+      // Log audit
+      await supabase.from("logs_auditoria").insert({
+        acao: "Worker Executado",
+        entidade: "worker-fila-envios",
+        entidade_id: "worker-cron",
+        dados_novos: {
+          inicio: new Date(startTime).toISOString(),
+          itensEncontrados: 0,
+          itensProcessados: 0,
+          sucessos: 0,
+          falhas: 0,
+          tempoExecucaoMs: executionTimeMs,
+        },
+        user_agent: "Worker Fila Envios Edge Function",
+      });
 
-    console.log(`[processar-fila-whatsapp] Encontrados ${eligibleItems.length} itens elegíveis de ${candidates?.length || 0} candidatos.`);
-
-    if (eligibleItems.length === 0) {
-      if (loteId) {
-        await recalcularStatusLote(supabase, loteId);
-      }
       return new Response(
         JSON.stringify({
           success: true,
-          processedCount: 0,
-          message: "Nenhum item pendente elegível para envio no momento.",
-          results: []
+          worker: "worker-fila-envios",
+          inicio: new Date(startTime).toISOString(),
+          tempoExecucaoMs: executionTimeMs,
+          itensEncontrados: 0,
+          itensProcessados: 0,
+          sucessos: 0,
+          falhas: 0,
+          mensagem: "Nenhum item pendente ou agendado elegível encontrado.",
+          detalhes: [],
         }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const results: any[] = [];
-    const affectedLoteIds = new Set<string>();
-    if (loteId) affectedLoteIds.add(loteId);
+    // Batch pre-fetch references to validate clients, reports, and batches efficiently
+    const clienteIds = Array.from(new Set(candidateItems.map(i => i.cliente_id).filter(Boolean)));
+    const relatorioIds = Array.from(new Set(candidateItems.map(i => i.relatorio_id).filter(Boolean)));
+    const loteIds = Array.from(new Set(candidateItems.map(i => i.lote_id).filter(Boolean)));
 
-    // Process each candidate item with atomic concurrency locking
-    for (const item of eligibleItems) {
-      if (item.lote_id) {
-        affectedLoteIds.add(item.lote_id);
+    const [{ data: clientes }, { data: relatorios }, { data: lotes }] = await Promise.all([
+      supabase.from("clientes").select("id, ativo, possui_optin, telefone_whatsapp").in("id", clienteIds),
+      supabase.from("relatorios").select("id, status_validacao, storage_path").in("id", relatorioIds),
+      supabase.from("lotes_envio").select("id, status").in("id", loteIds),
+    ]);
+
+    const clientesMap = new Map((clientes || []).map(c => [c.id, c]));
+    const relatoriosMap = new Map((relatorios || []).map(r => [r.id, r]));
+    const lotesMap = new Map((lotes || []).map(l => [l.id, l]));
+
+    const results: EnvioResult[] = [];
+    const affectedLoteIds = new Set<string>();
+
+    // 2 & 3. Atomic Lock & Filter & Process
+    for (const item of candidateItems) {
+      if (item.lote_id) affectedLoteIds.add(item.lote_id);
+
+      // Validate client, report and batch status in-memory before locking
+      const cliente = clientesMap.get(item.cliente_id);
+      const relatorio = relatoriosMap.get(item.relatorio_id);
+      const lote = item.lote_id ? lotesMap.get(item.lote_id) : null;
+
+      if (lote && lote.status === "cancelado") {
+        console.warn(`[worker-fila-envios] Item ${item.id} cancelado pois lote está cancelado.`);
+        await supabase
+          .from("fila_envios")
+          .update({ status: "falhou", erro_codigo: "LOTE_CANCELADO", erro_mensagem: "Lote de envio correspondente foi cancelado.", updated_at: new Date().toISOString() })
+          .eq("id", item.id);
+        results.push({ filaEnvioId: item.id, success: false, status: "falhou", errorCode: "LOTE_CANCELADO", errorMessage: "Lote cancelado" });
+        continue;
       }
 
-      console.log(`[processar-fila-whatsapp] Tentando bloquear item da fila ID: ${item.id}`);
+      if (!cliente || cliente.ativo === false || cliente.possui_optin === false || !cliente.telefone_whatsapp) {
+        const reason = !cliente ? "Cliente não encontrado" : !cliente.ativo ? "Cliente inativo" : !cliente.possui_optin ? "Cliente sem opt-in" : "Telefone de WhatsApp ausente";
+        await supabase
+          .from("fila_envios")
+          .update({ status: "falhou", erro_codigo: "CLIENTE_INVALIDO", erro_mensagem: reason, updated_at: new Date().toISOString() })
+          .eq("id", item.id);
+        results.push({ filaEnvioId: item.id, success: false, status: "falhou", errorCode: "CLIENTE_INVALIDO", errorMessage: reason });
+        continue;
+      }
 
-      // ATOMIC LOCK: Update status 'pendente' -> 'processando' ONLY if still 'pendente'
-      const { data: lockResult, error: lockError } = await supabase
+      if (!relatorio || relatorio.status_validacao !== "pronto" || !relatorio.storage_path) {
+        const reason = !relatorio ? "Relatório não encontrado" : relatorio.status_validacao !== "pronto" ? `Relatório não está pronto (${relatorio.status_validacao})` : "Caminho do arquivo no Storage ausente";
+        await supabase
+          .from("fila_envios")
+          .update({ status: "falhou", erro_codigo: "RELATORIO_INVALIDO", erro_mensagem: reason, updated_at: new Date().toISOString() })
+          .eq("id", item.id);
+        results.push({ filaEnvioId: item.id, success: false, status: "falhou", errorCode: "RELATORIO_INVALIDO", errorMessage: reason });
+        continue;
+      }
+
+      // ATOMIC CONCURRENCY LOCK: lock item from 'pendente' or 'agendado' to 'processando'
+      const { data: lockResult, error: lockErr } = await supabase
         .from("fila_envios")
         .update({
           status: "processando",
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .eq("id", item.id)
-        .eq("status", "pendente")
+        .in("status", ["pendente", "agendado"])
         .select("id");
 
-      if (lockError || !lockResult || lockResult.length === 0) {
-        console.warn(`[processar-fila-whatsapp] Item ${item.id} já capturado por outro worker ou status alterado. Ignorando.`);
+      if (lockErr || !lockResult || lockResult.length === 0) {
+        console.warn(`[worker-fila-envios] Concorrência: Item ${item.id} já bloqueado por outro worker. Ignorando.`);
         results.push({
           filaEnvioId: item.id,
           success: false,
@@ -535,38 +535,59 @@ serve(async (req) => {
         continue;
       }
 
-      console.log(`[processar-fila-whatsapp] Item ${item.id} bloqueado com sucesso. Executando envio...`);
+      console.log(`[worker-fila-envios] Item ${item.id} bloqueado com sucesso. Executando envio...`);
 
-      // Execute send logic
+      // 4. Send email/WhatsApp report using existing logic
       const itemResult = await processarEnvioItem(supabase, item.id);
-
-      console.log(`[processar-fila-whatsapp] Resultado para filaEnvioId ${item.id}: success=${itemResult.success}, status=${itemResult.status}`);
       results.push(itemResult);
     }
 
     // Recalculate status for all affected batches
-    for (const id of affectedLoteIds) {
-      await recalcularStatusLote(supabase, id);
+    for (const loteId of affectedLoteIds) {
+      await recalcularStatusLote(supabase, loteId);
     }
 
-    const summary = {
-      success: true,
-      processedCount: results.length,
-      sucessos: results.filter(r => r.success).length,
-      falhas: results.filter(r => !r.success).length,
-      results
-    };
+    const sucessos = results.filter(r => r.success).length;
+    const falhas = results.filter(r => !r.success && r.status !== "bloqueado_concorrencia").length;
+    const itensProcessados = results.filter(r => r.status !== "bloqueado_concorrencia").length;
+    const executionTimeMs = Date.now() - startTime;
 
-    console.log(`[processar-fila-whatsapp] Processamento concluído. Resumo: Sucessos=${summary.sucessos}, Falhas=${summary.falhas}`);
+    console.log(`[worker-fila-envios] Finalizado em ${executionTimeMs}ms. Encontrados=${itensEncontrados}, Processados=${itensProcessados}, Sucessos=${sucessos}, Falhas=${falhas}`);
+
+    // Audit log
+    await supabase.from("logs_auditoria").insert({
+      acao: "Worker Executado",
+      entidade: "worker-fila-envios",
+      entidade_id: "worker-cron",
+      dados_novos: {
+        inicio: new Date(startTime).toISOString(),
+        itensEncontrados,
+        itensProcessados,
+        sucessos,
+        falhas,
+        tempoExecucaoMs: executionTimeMs,
+      },
+      user_agent: "Worker Fila Envios Edge Function",
+    });
 
     return new Response(
-      JSON.stringify(summary),
+      JSON.stringify({
+        success: true,
+        worker: "worker-fila-envios",
+        inicio: new Date(startTime).toISOString(),
+        tempoExecucaoMs: executionTimeMs,
+        itensEncontrados,
+        itensProcessados,
+        sucessos,
+        falhas,
+        detalhes: results,
+      }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err: any) {
-    console.error("[processar-fila-whatsapp] Erro fatal na Edge Function:", err);
+    console.error("[worker-fila-envios] Erro fatal no worker:", err);
     return new Response(
-      JSON.stringify({ error: err.message || "Erro interno ao processar a fila" }),
+      JSON.stringify({ success: false, error: err.message || "Erro interno no worker de fila de envios" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
